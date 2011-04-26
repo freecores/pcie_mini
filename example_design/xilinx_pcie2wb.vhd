@@ -2,10 +2,11 @@
 -- Company:
 -- Engineer: Istvan Nagy, buenos@freemail.hu
 -- 
--- Create Date:    15:58:13 05/30/2010 
+-- Create Date:    05/30/2010
+-- Modify date:    04/26/2011
 -- Design Name:    pcie_mini
 -- Module Name:    xilinx_pcie2wb - Behavioral 
--- Version:        1.0
+-- Version:        1.1
 -- Project Name: 
 -- Target Devices: Xilinx Series-5/6/7 FPGAs
 -- Tool versions: ISE-DS 12.1
@@ -240,7 +241,9 @@ architecture Behavioral of xilinx_pcie2wb is
   SIGNAL cfg_interrupt_assert_n_1 :      std_logic;
   SIGNAL trn_tsrc_rdy_n_1 :      std_logic;
   SIGNAL trn_tsof_n1 :      std_logic;
-  SIGNAL rcompl_bytecount_field  : std_logic_vector(9 downto 0); 
+  SIGNAL rcompl_bytecount_field  : std_logic_vector(9 downto 0);
+  SIGNAL rxstm_readytoroll :      std_logic;
+  SIGNAL tlpstm_isin_idle :      std_logic;
   
   
   
@@ -668,11 +671,7 @@ cfg_turnoff_ok_n <= '1';
                 --********** IDLE STATE  **********
                 when "00000000" =>   --state 0        
                     wb_transaction_complete <='0';
-						  pcie_bar0_wb_sel_o(0) <= pcie_bar0_wb_sel_o_feed(3); --swap endianism
-						  pcie_bar0_wb_sel_o(1) <= pcie_bar0_wb_sel_o_feed(2); --swap endianism
-						  pcie_bar0_wb_sel_o(2) <= pcie_bar0_wb_sel_o_feed(1); --swap endianism
-						  pcie_bar0_wb_sel_o(3) <= pcie_bar0_wb_sel_o_feed(0); --swap endianism
-						  --or no endian swap on SEL: pcie_bar0_wb_sel_o <= pcie_bar0_wb_sel_o_feed;
+						  pcie_bar0_wb_sel_o <= pcie_bar0_wb_sel_o_feed;
 						  pcie_bar0_wb_addr_o <= pcie_bar0_wb_addr_o_feed;
 						  if (start_read_wb0 ='1') then --go to read
 						    wb0_state <= "00000001";
@@ -863,7 +862,8 @@ cfg_turnoff_ok_n <= '1';
 
 
 	-- RX: INTERFACE TO THE PCIE-EP: GET thereceived TLP PACKETS:- ----
-    process (pciewb_localreset_n, trn_clk, epif_rx_state, tlp_state, trn_rx_counter, bram_rxtlp_writeaddress) 
+    process (pciewb_localreset_n, trn_clk, epif_rx_state, tlp_state, trn_rx_counter, 
+				bram_rxtlp_writeaddress, rxstm_readytoroll, trn_rsof_n, tlpstm_isin_idle, trn_rdst_rdy_n) 
     begin
     if (pciewb_localreset_n='0') then 
 		 pcie_just_received_a_new_tlp <= '0'; 
@@ -873,37 +873,45 @@ cfg_turnoff_ok_n <= '1';
 		 bram_rxtlp_we <= "0";
 		 bram_rxtlp_writeaddress <= (OTHERS => '0');
 		 bram_rxtlp_writedata  <= (OTHERS => '0');
+		 rxstm_readytoroll <= '0';
     else
       if (trn_clk'event and trn_clk = '1') then
 
-            if (tlp_state = 0)then
-				  trn_rdst_rdy_n <= '0';
-				else
-				  trn_rdst_rdy_n <= '1';
-				end if;		
-		
                 case ( epif_rx_state ) is
 
                 --********** idle STATE  **********
                 when "00000000" =>   --state 0
 						  pcie_just_received_a_new_tlp <= '0';
-						   bram_rxtlp_writedata  <= trn_rd;
-						  if (trn_rsrc_rdy_n='0' and trn_rsof_n='0') then 
+						  bram_rxtlp_writedata  <= trn_rd;
+						  if (trn_rsrc_rdy_n='0' and trn_rsof_n='0' and tlpstm_isin_idle = '1' and trn_rdst_rdy_n='0') then 
 						    trn_rx_counter <= trn_rx_counter +1;
 							 bram_rxtlp_writeaddress <= bram_rxtlp_writeaddress +1;
 							 epif_rx_state <= "00000001";
-							 --read first DW: 
-							 bram_rxtlp_we <= "1";
 						  else
 						    trn_rx_counter <= (OTHERS => '0');
 							 bram_rxtlp_writeaddress  <= (OTHERS => '0');
+						  end if;
+						  --destination ready:
+						  if (tlpstm_isin_idle = '1')then
+							  trn_rdst_rdy_n <= '0';
+						  else
+							  trn_rdst_rdy_n <= '1';
+						  end if;
+						  --write into buffer:
+						  if (trn_rsrc_rdy_n='0' and trn_rsof_n='0' and tlpstm_isin_idle = '1') then 
+							 bram_rxtlp_we <= "1";
+							 rxstm_readytoroll <= '1';
+						  else
 							 bram_rxtlp_we <= "0";
+							 rxstm_readytoroll <= '0';
 						  end if;
 
                 --********** read STATE ********** 
                 when "00000001" =>   --state 1
+						  rxstm_readytoroll <= '0';
 						  if (trn_reof_n ='0') then --last dw
 						    epif_rx_state <= "00000010"; --for the next clk cycle
+							 trn_rdst_rdy_n <= '1'; --ok, dont send more yet
 						  end if;
 						  if (trn_rsrc_rdy_n='0') then --only act if the EP was ready
 							  trn_rx_counter <= trn_rx_counter +1;
@@ -1037,6 +1045,7 @@ cfg_turnoff_ok_n <= '1';
 		rxdw1_23_0 <= (others => '0'); 
 		pcie_rxtlp_tag <= (others => '0');
 		rcompl_bytecount_field  <= (others => '0');
+		tlpstm_isin_idle <= '1';
     else
       if (trn_clk'event and trn_clk = '1') then
                 case ( tlp_state ) is
@@ -1046,6 +1055,9 @@ cfg_turnoff_ok_n <= '1';
                 when "00000000" =>   --state 0        
                     if (pcie_just_received_a_new_tlp='1') then
 						    tlp_state <= "00000001"; --to tlp decoding state
+							 tlpstm_isin_idle <= '0';
+						  else
+						    tlpstm_isin_idle <= '1';
 						  end if;
 						  start_write_wb0 <= '0';
 						  start_read_wb0 <= '0';
@@ -1059,7 +1071,6 @@ cfg_turnoff_ok_n <= '1';
 							pcie_bar0_wb_data_o_feed	 <= (others => '0');
 							pcie_bar0_wb_addr_o_feed <= (others => '0');
 							pcie_bar0_wb_sel_o_feed  <= (others => '0');
-							 rxtlp_header_dw1   <= "01111111000000000000000000000000";
 							rxtlp_header_dw2   <= (others => '0');
 							rxtlp_header_dw3   <= (others => '0');
 							rxtlp_header_dw4   <= (others => '0');
@@ -1072,7 +1083,6 @@ cfg_turnoff_ok_n <= '1';
 							rxtlp_lastdw_be <= (others => '0');
 							rxtlp_requesterid <= (others => '0');
 							rcompl_bytecount_field  <= (others => '0');
-
 
 	
                 --********** TLP ARRIVED STATE **********
@@ -1255,22 +1265,20 @@ cfg_turnoff_ok_n <= '1';
                 when "00000101" =>   --state 5
                     tlp_state_copy <= tlp_state;
 						  tlp_payloadsize_dwords <= "00000000";
+						  bram_txtlp_writeaddress <= bram_txtlp_writeaddress +1;
 						  --assembling the TLP packet:           )
 						  if (bram_txtlp_writeaddress="111111111") then --header 1.dw
-						    bram_txtlp_writeaddress <= bram_txtlp_writeaddress +1;
 						    bram_txtlp_we <= "1";
 							  bram_txtlp_writedata (31) <= flag1; --reserved
 							  bram_txtlp_writedata (30 downto 24) <= "1001010"; --type= rd completion
 							  bram_txtlp_writedata (23 downto 0) <= rxdw1_23_0; --various fields pcie_received_tlp (23 downto 0);
 						  elsif (bram_txtlp_writeaddress="000000000") then --header 2.dw
-						    bram_txtlp_writeaddress <= bram_txtlp_writeaddress +1;
 						    bram_txtlp_we <= "1";
 							  bram_txtlp_writedata (31 downto 16) <= cfg_completer_id; --completer ID
 							  bram_txtlp_writedata (15 downto 13) <= "000"; --status= UNSUPPORTED REQUEST ***
 							  bram_txtlp_writedata (12) <= '0'; --reserved
 							  bram_txtlp_writedata (11 downto 0) <= "000000000000"; --remaining byte count
 						  elsif (bram_txtlp_writeaddress="000000001") then --header 3.dw
-						    bram_txtlp_writeaddress <= bram_txtlp_writeaddress +1;
 						    bram_txtlp_we <= "1";
 							  bram_txtlp_writedata (31 downto 16) <= rxtlp_requesterid; --requester ID
 							  bram_txtlp_writedata (15 downto 8) <= pcie_rxtlp_tag ; --pcie_received_tlp (47 downto 40);--tag
@@ -1278,9 +1286,6 @@ cfg_turnoff_ok_n <= '1';
 							  bram_txtlp_writedata (6 downto 2) <= rxtlp_decodedaddress(6 downto 2); --lower address
 							  bram_txtlp_writedata (1 downto 0) <= bit10(1 downto 0); 		  --lower address
 						  else --data dwords 
-						  --2. read data : no data in this type of packet
-							--this was written directly during the read state.
-						    bram_txtlp_writeaddress <= bram_txtlp_writeaddress;
 						    bram_txtlp_we <= "0";
 						  end if;
 							--one pulse to start the ep-if statemachine, upon arriving to this state
@@ -1306,24 +1311,24 @@ cfg_turnoff_ok_n <= '1';
 
 
 	--byte enable encoding to wb_address bit1:0
-	--this also takes the endian swapping into account.
+	--this does not swap the endian, since only the data is swapped in the pcie packets.
 	 process ( pciewb_localreset_n, rxtlp_firstdw_be )
     begin
        if (pciewb_localreset_n = '0') then
            bit10(1 downto 0) <="00";
        else
          if (rxtlp_firstdw_be ="0001") then
-			  bit10(1 downto 0) <= "11";
+			  bit10(1 downto 0) <= "00";
          elsif (rxtlp_firstdw_be ="0010") then
-			  bit10(1 downto 0) <= "10";
-         elsif (rxtlp_firstdw_be ="0100") then
 			  bit10(1 downto 0) <= "01";
-         elsif (rxtlp_firstdw_be ="1000") then
-			  bit10(1 downto 0) <= "00";
-         elsif (rxtlp_firstdw_be ="0011") then
+         elsif (rxtlp_firstdw_be ="0100") then
 			  bit10(1 downto 0) <= "10";
-         elsif (rxtlp_firstdw_be ="1100") then
+         elsif (rxtlp_firstdw_be ="1000") then
+			  bit10(1 downto 0) <= "11";
+         elsif (rxtlp_firstdw_be ="0011") then
 			  bit10(1 downto 0) <= "00";
+         elsif (rxtlp_firstdw_be ="1100") then
+			  bit10(1 downto 0) <= "10";
          elsif (rxtlp_firstdw_be ="1111") then 
 			  bit10(1 downto 0) <= "00";
 			else --this should never happen
@@ -1331,31 +1336,6 @@ cfg_turnoff_ok_n <= '1';
 			end if;
        end if;
     end process;
-	 --without endian swap:
---	 process ( pciewb_localreset_n, rxtlp_firstdw_be )
---    begin
---       if (pciewb_localreset_n = '0') then
---           bit10(1 downto 0) <="00";
---       else
---         if (rxtlp_firstdw_be ="0001") then
---			  bit10(1 downto 0) <= "00";
---         elsif (rxtlp_firstdw_be ="0010") then
---			  bit10(1 downto 0) <= "01";
---         elsif (rxtlp_firstdw_be ="0100") then
---			  bit10(1 downto 0) <= "10";
---         elsif (rxtlp_firstdw_be ="1000") then
---			  bit10(1 downto 0) <= "11";
---         elsif (rxtlp_firstdw_be ="0011") then
---			  bit10(1 downto 0) <= "00";
---         elsif (rxtlp_firstdw_be ="1100") then
---			  bit10(1 downto 0) <= "10";
---         elsif (rxtlp_firstdw_be ="1111") then 
---			  bit10(1 downto 0) <= "00";
---			else --this should never happen
---			  bit10(1 downto 0) <= "00";
---			end if;
---       end if;
---    end process;
 	 
 	 
 	 
