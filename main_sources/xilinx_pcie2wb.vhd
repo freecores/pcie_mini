@@ -6,9 +6,9 @@
 -- Modify date:    04/26/2011
 -- Design Name:    pcie_mini
 -- Module Name:    xilinx_pcie2wb - Behavioral 
--- Version:        1.1
+-- Version:        1.2
 -- Project Name: 
--- Target Devices: Xilinx Series-5/6/7 FPGAs
+-- Target Devices: Xilinx Series-5/6/7 FPGAs (This code is tested on Spartan-6 XC6SLX45T)
 -- Tool versions: ISE-DS 12.1
 -- Description: 
 --  PCI-express endpoint block, transaction layer logic and back-end logic. The main 
@@ -40,6 +40,27 @@
 --  If we generate a new pcie endpoint, then copy the new files from the source
 --  directory into the project's directory, and copy the generic section of the "pcie" 
 --  from the file: xilinx_pcie_1_1_ep_s6.vhd, into this file.
+--
+-- Device Type Migration:
+--  This core should work on any Xilinx Series-5/6/7 FPGAs, but at now it runs on XC6SLX45T.
+--  For a new device (not an XC6SLX45T) we have to regenerate the Coregenerator cores,
+--  replace all BUFIO2/MGT/BUFG/BRAM (and other) to the chosen device's appropriate resources,
+--  in both the VHDL and the UCF sources. Also in the UCF the BUFIO2 and MGT placements 
+--  will have to be re-specified with the appropriate resources/locations. The coregenerator
+--  will have to be set up to generate cores with the same parameters and ports as they are
+--  used here (to be useable as a drop-in replacement). Some resources are instantiated as
+--  part of the Coregen cores, so they will be chosen by Coregen appropriately, we just need
+--  to adjust their LOC placement constraints in the UCF file.
+--
+-- Coregenerator parameters:
+--  PCIe-EP: Name=pcie, Type=LegacyPCIe-EP, BAR0=mem/256MB, BAR1+=off, ROM=off, Max Payload=512Bytes, 
+--           ASPM-L1=off, SlotCLK=off, IRQ=INTA, DeviceSpecInit=off, D1/D2=on, PME_from=D0, 
+--           Set D0 power (4W), DSN=enabled, PCI_ConfSp=off, PCIe_Extended_ConfSp=off, 
+--           no_scram =off, Xil_Refboard=None, RefClkFreq=125MHz, TranscLoc/Ch="leave default".
+--  Blockram: Name=blk_mem_gen_v4_1, Type=SimpleDpRAM, WriteEn=off, Algor=MinArea, 
+--            WriteWidth=32, WriteDepth=512, Ena=AlwaysEnabled, ReadWidth=32, RegisterPorttB=off
+--            LoadInitFile=off, Fill=off, UseRSTB=off.
+--
 -- Synthesis: Set the "FSM Encoding Algorithm" to "user".
 --
 -- Revision: 
@@ -244,7 +265,8 @@ architecture Behavioral of xilinx_pcie2wb is
   SIGNAL rcompl_bytecount_field  : std_logic_vector(9 downto 0);
   SIGNAL rxstm_readytoroll :      std_logic;
   SIGNAL tlpstm_isin_idle :      std_logic;
-  
+  SIGNAL pcierx_detected :  std_logic;
+  SIGNAL pcierx_detect_ff_clear :  std_logic;  
   
   
   
@@ -942,7 +964,22 @@ cfg_turnoff_ok_n <= '1';
 	 --trn_rnp_ok_ntrn_rnp_ok_n <= '0'; --ready to receive non-posted
 	 --not connected: trn_rerrfwd_n, trn_rsrc_dsc_n, trn_rbar_hit_n
 
-
+	--RX detection flip-flop
+	process (pciewb_localreset_n, trn_clk)
+	begin
+	if (pciewb_localreset_n='0') then 
+		pcierx_detected <= '0';
+	else
+		if (trn_clk'event and trn_clk = '1') then
+			if (pcie_just_received_a_new_tlp ='1') then
+			  pcierx_detected <= '1';
+			elsif (pcierx_detect_ff_clear ='1') then
+			  pcierx_detected <= '0';
+			end if;
+		end if;        
+	end if;
+	end process;
+	
 
 
 
@@ -950,6 +987,7 @@ cfg_turnoff_ok_n <= '1';
 	--not used. pcie-ep provides information about credit status.
 	--unconnected: trn_fc_nph, trn_fc_npd, trn_fc_ph, trn_fc_pd, trn_fc_cplh, trn_fc_cpld
 	trn_fc_sel <= "000";
+
 
 
 
@@ -1011,7 +1049,7 @@ cfg_turnoff_ok_n <= '1';
 
 	 --TLP-protocol statemachine:
     process (pciewb_localreset_n, trn_clk, tlp_state, 
-				pcie_just_received_a_new_tlp, tlp_datacount,
+				pcierx_detected, tlp_datacount,
 				bram_rxtlp_readdata,  bram_txtlp_writeaddress, bram_rxtlp_readaddress,
 				tlp_state_copy, rxtlp_decodedaddress, 
 				rxtlp_header_dw1, rxtlp_header_dw2, rxtlp_header_dw3, rxtlp_header_dw4,
@@ -1046,6 +1084,7 @@ cfg_turnoff_ok_n <= '1';
 		pcie_rxtlp_tag <= (others => '0');
 		rcompl_bytecount_field  <= (others => '0');
 		tlpstm_isin_idle <= '1';
+		pcierx_detect_ff_clear <= '0';
     else
       if (trn_clk'event and trn_clk = '1') then
                 case ( tlp_state ) is
@@ -1053,7 +1092,7 @@ cfg_turnoff_ok_n <= '1';
                 --********** IDLE STATE  **********
 					 --also re-initialize signals...
                 when "00000000" =>   --state 0        
-                    if (pcie_just_received_a_new_tlp='1') then
+                    if (pcierx_detected='1') then
 						    tlp_state <= "00000001"; --to tlp decoding state
 							 tlpstm_isin_idle <= '0';
 						  else
@@ -1083,6 +1122,7 @@ cfg_turnoff_ok_n <= '1';
 							rxtlp_lastdw_be <= (others => '0');
 							rxtlp_requesterid <= (others => '0');
 							rcompl_bytecount_field  <= (others => '0');
+							pcierx_detect_ff_clear <= '0';
 
 	
                 --********** TLP ARRIVED STATE **********
@@ -1095,10 +1135,12 @@ cfg_turnoff_ok_n <= '1';
 						  bram_rxtlp_readaddress <= bram_rxtlp_readaddress +1;
 						  if (bram_rxtlp_readaddress = "000000010") then
 						    rxtlp_header_dw1 <= bram_rxtlp_readdata;
+							 pcierx_detect_ff_clear <= '1';
 						  elsif (bram_rxtlp_readaddress = "000000011") then
 						    rxtlp_header_dw2 <= bram_rxtlp_readdata;
 						  elsif (bram_rxtlp_readaddress = "000000100") then
 						    rxtlp_header_dw3 <= bram_rxtlp_readdata;
+							 pcierx_detect_ff_clear <= '0';
 						  elsif (bram_rxtlp_readaddress = "000000101") then
 						    rxtlp_header_dw4 <= bram_rxtlp_readdata;
 						  end if;
@@ -1169,6 +1211,7 @@ cfg_turnoff_ok_n <= '1';
                 --* Write restart state *
                 when "00010100" =>   --state 20
  						tlp_state <= "00000010";
+						tlp_state_copy <= tlp_state;
 
 
                 --********** READ STATE **********
@@ -1201,9 +1244,11 @@ cfg_turnoff_ok_n <= '1';
                 when "00011110" =>   --state 30
 						tlp_state <= "00000011";
 						bram_txtlp_we <= "0";
+						tlp_state_copy <= tlp_state;
                 --intermediate state before completion (to ensure data latch at address-4)
 					 when "01111110" =>   --state 126
 						tlp_state <= "00000100";
+						tlp_state_copy <= tlp_state;
 						bram_txtlp_writeaddress  <=  (OTHERS => '0');
 						--pre-write header-DW1:
 						bram_txtlp_writedata (31) <= flag1; --reserved
