@@ -42,7 +42,7 @@
 --  from the file: xilinx_pcie_1_1_ep_s6.vhd, into this file.
 --
 -- Device Type Migration:
---  This core should work on any Xilinx Series-5/6/7 FPGAs, but at now it runs on XC6SLX45T.
+--  This core was tested on Xilinx Spartan-6 FPGAs, specifically on the XC6SLX45T.
 --  For a new device (not an XC6SLX45T) we have to regenerate the Coregenerator cores,
 --  replace all BUFIO2/MGT/BUFG/BRAM (and other) to the chosen device's appropriate resources,
 --  in both the VHDL and the UCF sources. Also in the UCF the BUFIO2 and MGT placements 
@@ -51,6 +51,11 @@
 --  used here (to be useable as a drop-in replacement). Some resources are instantiated as
 --  part of the Coregen cores, so they will be chosen by Coregen appropriately, we just need
 --  to adjust their LOC placement constraints in the UCF file.
+--  Use on 7-series FPGAs:
+--  Xilinx Series-7 FPGAs have only 64-bit bus support on the PCIe port for x1/x2, 
+--  and 28bit for x4/x8. Initial compatibility can be maintained with minimal modifications, by 
+--  replacing the TX and RX block-ram buffers to assymetrically sized port buffers. 64bit on the PCIE-EP side, and 32-bit on the other side. Also the first entry has to be corrected to be at address zero or address-2, since now it is at address-1 which will get misaligned after a port-width conversion. Also the TRN-interfaces have to be modified to work with the AXI4 interface used by the series-7 PCIE-EP blocks.
+
 --
 -- Coregenerator parameters:
 --  PCIe-EP: Name=pcie, Type=LegacyPCIe-EP, BAR0=mem/256MB, BAR1+=off, ROM=off, Max Payload=512Bytes, 
