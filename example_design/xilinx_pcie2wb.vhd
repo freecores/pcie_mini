@@ -3,10 +3,10 @@
 -- Engineer: Istvan Nagy, buenos@freemail.hu
 -- 
 -- Create Date:    05/30/2010
--- Modify date:    04/26/2011
+-- Modify date:    08/10/2012
 -- Design Name:    pcie_mini
 -- Module Name:    xilinx_pcie2wb - Behavioral 
--- Version:        1.1
+-- Version:        1.2
 -- Project Name: 
 -- Target Devices: Xilinx Series-5/6/7 FPGAs
 -- Tool versions: ISE-DS 12.1
@@ -43,10 +43,12 @@
 -- Synthesis: Set the "FSM Encoding Algorithm" to "user".
 --
 -- Revision: 
--- Revision 0.01 - File Created
-
+-- Revision 1.0 - File Created by Istvan Nagy
+-- Revision 1.1 - some fixes by Istvan Nagy
+-- Revision 1.2 - interrupt fix by Stephen Battazzo
 --
 ----------------------------------------------------------------------------------
+
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.STD_LOGIC_ARITH.ALL;
@@ -208,6 +210,9 @@ architecture Behavioral of xilinx_pcie2wb is
     SIGNAL   txtlp_data_7      :  std_logic_vector(31 downto 0);
     SIGNAL   pcie_tlp_tx_complete       :  std_logic; 
 	 
+	 --this signal added by StBa, AAC Microtec
+	 SIGNAL  irq_prohibit    :   std_logic;
+	 
 	 SIGNAL  pcieirq_state    :  std_logic_vector(7 downto 0);
 	 SIGNAL  txtrn_counter   :  std_logic_vector(7 downto 0);
 	 SIGNAL  trn_rx_counter   :  std_logic_vector(7 downto 0);
@@ -300,11 +305,12 @@ architecture Behavioral of xilinx_pcie2wb is
     SLOT_CAP_POWER_INDICATOR_PRESENT  : boolean    := FALSE;
     DEV_CAP_ROLE_BASED_ERROR          : boolean    := TRUE;
     LINK_CAP_ASPM_SUPPORT             : integer    := 1;
-    LINK_CAP_L0S_EXIT_LATENCY         : integer    := 7;
-    LINK_CAP_L1_EXIT_LATENCY          : integer    := 7;
-    LL_ACK_TIMEOUT                    : bit_vector := x"0204";
+    --LINK_CAP_L0S_EXIT_LATENCY         : integer    := 7;
+    --LINK_CAP_L1_EXIT_LATENCY          : integer    := 7;
+    LL_ACK_TIMEOUT                    : bit_vector := x"0000";
     LL_ACK_TIMEOUT_EN                 : boolean    := FALSE;
-    LL_REPLAY_TIMEOUT                 : bit_vector := x"0204";
+    --LL_REPLAY_TIMEOUT                 : bit_vector := x"0204";
+	 LL_REPLAY_TIMEOUT                 : bit_vector := x"0000";
     LL_REPLAY_TIMEOUT_EN              : boolean    := FALSE;
     MSI_CAP_MULTIMSGCAP               : integer    := 0;
     MSI_CAP_MULTIMSG_EXTENSION        : integer    := 0;
@@ -339,7 +345,7 @@ architecture Behavioral of xilinx_pcie2wb is
     PCIE_GENERIC                      : bit_vector := "000011101111";
     GTP_SEL                           : integer    := 0;
     CFG_VEN_ID                        : std_logic_vector(15 downto 0) := x"10EE";
-    CFG_DEV_ID                        : std_logic_vector(15 downto 0) := x"ABCD";
+    CFG_DEV_ID                        : std_logic_vector(15 downto 0) := x"BADD";
     CFG_REV_ID                        : std_logic_vector(7 downto 0)  := x"00";
     CFG_SUBSYS_VEN_ID                 : std_logic_vector(15 downto 0) := x"10EE";
     CFG_SUBSYS_ID                     : std_logic_vector(15 downto 0) := x"1234";
@@ -450,7 +456,9 @@ architecture Behavioral of xilinx_pcie2wb is
 ---- ------- SYNTHESIS ATTRIBUTES: --------------------------------------------------
 --attribute keep_hierarchy : string; 
 --attribute keep_hierarchy of xilinx_pcie2wb: entity is "yes"; 
-
+attribute keep : string;
+attribute keep of cfg_dstatus : signal is "true";
+attribute keep of tlp_state : signal is "true";
 
 
 -- --------ARCHITECTURE BODY BEGINS -----------------------------------------------
@@ -1366,7 +1374,12 @@ cfg_turnoff_ok_n <= '1';
 	--03h INTD 
 
 	cfg_interrupt_di    <= "00000000"; --intA used
-
+	
+	--prohibit IRQ assert when TLP state machine not idle.
+	-- if an IRQ is asserted between a read request and completion, it causes an error in the endpoint block.
+	-- added by StBa, AAC Microtec, 2012
+	irq_prohibit <= not tlpstm_isin_idle; 
+	
     process (pciewb_localreset_n, trn_clk, pcie_irq, pcieirq_state, 
 				cfg_interrupt_rdy_n) 
     begin
@@ -1380,7 +1393,7 @@ cfg_turnoff_ok_n <= '1';
 
                 --********** idle STATE  **********
                 when "00000000" =>   --state 0        
-                    if (pcie_irq = '1') then
+                    if (pcie_irq = '1' and irq_prohibit = '0') then
 						    pcieirq_state <= "00000001";
 							 cfg_interrupt_n <= '0'; --active
 						  else
@@ -1399,7 +1412,7 @@ cfg_turnoff_ok_n <= '1';
 
                 --********** pcie_irq kept asserted STATE **********     				 
                 when "00000010" =>   --state 2
-                    if (pcie_irq = '0') then --pcie_irq gets deasserted
+                    if (pcie_irq = '0' and irq_prohibit='0') then --pcie_irq gets deasserted
 						    pcieirq_state <= "00000011";
 						  end if;
 						 cfg_interrupt_n <= '1'; --inactive	
